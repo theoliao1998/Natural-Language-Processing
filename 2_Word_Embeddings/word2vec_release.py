@@ -1,6 +1,6 @@
 import os,sys,re,csv
 import pickle
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, OrderedDict
 import numpy as np
 import scipy
 import math
@@ -82,7 +82,7 @@ def loadData(filename):
 	# more if you want later (and should do this for the final homework)
 	handle = open(filename, "r", encoding="utf8")
 	fullconts = handle.read().split("\n")
-	fullconts = fullconts[1:15000]  # (TASK) Use all the data for the final submission
+	fullconts = fullconts # (TASK) Use all the data for the final submission
 	#... apply simple tokenization (whitespace and lowercase)
 	fullconts = [" ".join(fullconts).lower()]
 
@@ -101,12 +101,16 @@ def loadData(filename):
 	stop_words = set(stopwords.words('english'))
 	for word in nltk.word_tokenize(fullconts[0]):
 		if word not in stop_words:
-			if word not in origcounts:
-				fullrec.append(word)
+			fullrec.append(word)
 			origcounts[word] += 1
 		
 
-
+	def UNKtoken(word,improve=False):
+		if improve and len(word) >= 2 and word[-2:] == "ly":
+			return "<UNKly>"
+		if improve and len(word) >= 3 and word[-2:] == "ing":
+			return "<UNKing>"
+		return "<UNK>"
 
 
 
@@ -114,15 +118,12 @@ def loadData(filename):
 	#... (TASK) populate array fullrec_filtered to include terms as-is that appeared at least min_count times
 	#... replace other terms with <UNK> token.
 	#... update frequency count of each token in dict wordcounts where: wordcounts[token] = freq(token)
-	fullrec_filtered = [] #... fill in
-	wordcounts = Counter()
-	for word in fullrec:
-		if origcounts[word] >= 50:
+	fullrec_filtered = [word if origcounts[word] >= 50 else UNKtoken(word) for word in fullrec]
+	for word in fullrec_filtered:
+		if word not in {"<UNK>","<UNKly>","<UNKing>"}:
 			wordcounts[word] = origcounts[word]
-			fullrec_filtered.append(word)
 		else:
-			wordcounts["<UNK>"] += 1
-
+			wordcounts[word] += origcounts[word]
 
 
 	#... after filling in fullrec_filtered, replace the original fullrec with this one.
@@ -137,8 +138,9 @@ def loadData(filename):
 	#... (TASK) sort the unique tokens into array uniqueWords
 	#... produce their one-hot indices in dict wordcodes where wordcodes[token] = onehot_index(token)
 	#... replace all word tokens in fullrec with their corresponding one-hot indices.
-	uniqueWords = #... fill in
-	wordcodes = #... fill in
+	uniqueWords = list(OrderedDict.fromkeys(fullrec))  #... fill in
+	wordcodes = {w:i for i,w in enumerate(uniqueWords)}
+	fullrec = [wordcodes[w] for w in fullrec]
 
 
 
@@ -199,7 +201,7 @@ def negativeSampleTable(train_data, uniqueWords, wordcounts, exp_power=0.75):
 	print ("Generating exponentiated count vectors")
 	#... (TASK) for each uniqueWord, compute the frequency of that word to the power of exp_power
 	#... store results in exp_count_array.
-	exp_count_array = #... fill in
+	exp_count_array = [wordcounts[w]**exp_power for w in uniqueWords]
 	max_exp_count = sum(exp_count_array)
 
 
@@ -209,7 +211,7 @@ def negativeSampleTable(train_data, uniqueWords, wordcounts, exp_power=0.75):
 	#... (TASK) compute the normalized probabilities of each term.
 	#... using exp_count_array, normalize each value by the total value max_exp_count so that
 	#... they all add up to 1. Store this corresponding array in prob_dist
-	prob_dist = #... fill in
+	prob_dist = [exp_cnt/max_exp_count for exp_cnt in exp_count_array] #... fill in
 
 
 
@@ -221,10 +223,9 @@ def negativeSampleTable(train_data, uniqueWords, wordcounts, exp_power=0.75):
 	#... multiplied by table_size. This table should be stored in cumulative_dict.
 	#... we do this for much faster lookup later on when sampling from this table.
 
-	cumulative_dict = #... fill in
 	table_size = 1e7
-
-
+	cumulative_dict = {j:i for i in range(len(prob_dist)) \
+		for j in range(int(sum(prob_dist[:i]) * table_size),int(sum(prob_dist[:i+1]) * table_size))}
 
 
 	return cumulative_dict
@@ -245,7 +246,14 @@ def generateSamples(context_idx, num_samples):
 	#... (TASK) randomly sample num_samples token indices from samplingTable.
 	#... don't allow the chosen token to be context_idx.
 	#... append the chosen indices to results
-
+	for i in range(num_samples*len(context_idx)):
+		tmp = random.choice(samplingTable)
+		while tmp in context_idx:
+			randcounter += 1
+			random.seed(randcounter)
+			tmp = random.choice(samplingTable)
+		
+		results.append(tmp)
 
 	return results
 
@@ -253,19 +261,33 @@ def generateSamples(context_idx, num_samples):
 
 
 @jit(nopython=True)
-def performDescent(num_samples, learning_rate, center_token, context_words,W1,W2,negative_indices):
+def performDescent(center_token, context_words, W1,W2,negative_indices,learning_rate=0.05):
 	# sequence chars was generated from the mapped sequence in the core code
 	nll_new = 0
+	h = np.copy(W1[center_token])
+	for idx in context_words:
+		W1[center_token] -= learning_rate * (sigmoid(W2[idx].dot(h.T))-1) * W2[idx]
+		W2[idx] -= learning_rate * (sigmoid(W2[idx].dot(h.T))-1) * h
+
+	for idx in negative_indices:
+		W1[center_token] -= learning_rate * (sigmoid(W2[idx].dot(h.T))) * W2[idx]
+		W2[idx] -= learning_rate * (sigmoid(W2[idx].dot(h.T))) * h
+
+
 		#... (TASK) implement gradient descent. Find the current context token from context_words
 		#... and the associated negative samples from negative_indices. Run gradient descent on both
 		#... weight matrices W1 and W2.
 		#... compute the total negative log-likelihood and store this in nll_new.
 		#... You don't have to use all the input list above, feel free to change them
-		
+	
+	tmp = 0
+	for idx in negative_indices:
+		tmp += np.log(sigmoid(-W2[idx].dot(h.T)))
 
+	for idx in context_words:
+		nll_new -= np.log(sigmoid(W2[idx].dot(h.T))) + tmp
 
-
-	return [nll_new]
+	return nll_new
 
 
 
@@ -335,28 +357,33 @@ def trainer(curW1 = None, curW2=None):
 
 
 			#... (TASK) determine which token is our current input. Remember that we're looping through mapped_sequence
-			center_token = #... fill in
+			center_token = mapped_sequence[i]#... fill in
 			#... (TASK) don't allow the center_token to be <UNK>. move to next iteration if you found <UNK>.
-
+			if uniqueWords[center_token] in {'<UNK>','<UNKly>','UNKing'}:
+				continue
 
 
 
 
 			iternum += 1
+
+			context_indices = []
 			#... now propagate to each of the context outputs
 			for k in range(0, len(context_window)):
 
 				#... (TASK) Use context_window to find one-hot index of the current context token.
-				context_index = #... fill in
+				context_indices.append(mapped_sequence[i + context_window[k]]) #... fill in
 
 
 
 				#... construct some negative samples
-				negative_indices = generateSamples(context_index, num_samples)
+			negative_indices = generateSamples(context_indices, num_samples)
 
 				#... (TASK) You have your context token and your negative samples.
 				#... Perform gradient descent on both weight matrices.
 				#... Also keep track of the negative log-likelihood in variable nll.
+				
+			nll += performDescent(center_token, context_indices, W1, W2, negative_indices)
 
 
 
@@ -372,10 +399,10 @@ def trainer(curW1 = None, curW2=None):
 #.................................................................................
 
 def load_model():
-	handle = open("saved_W1.data(4)","rb")
+	handle = open("saved_W1.data","rb")
 	W1 = np.load(handle)
 	handle.close()
-	handle = open("saved_W2.data(4)","rb")
+	handle = open("saved_W2.data","rb")
 	W2 = np.load(handle)
 	handle.close()
 	return [W1,W2]
@@ -448,7 +475,7 @@ def morphology(word_seq):
 	#... find whichever vector is closest to vector_math
 	#... (TASK) Use the same approach you used in function prediction() to construct a list
 	#... of top 10 most similar words to vector_math. Return this list.
-
+	return get_predictions(vector_math)
 
 
 
@@ -465,10 +492,11 @@ def analogy(word_seq):
 	vectors = [embeddings[wordcodes[word_seq[0]]],
 	embeddings[wordcodes[word_seq[1]]],
 	embeddings[wordcodes[word_seq[2]]]]
-	vector_math = -vectors[0] + vectors[1] - vectors[2] # + vectors[3] = 0
+	vector_math = -vectors[0] + vectors[1] + vectors[2]
 	#... find whichever vector is closest to vector_math
 	#... (TASK) Use the same approach you used in function prediction() to construct a list
 	#... of top 10 most similar words to vector_math. Return this list.
+	return get_predictions(vector_math)[0]
 
 
 
@@ -480,6 +508,12 @@ def analogy(word_seq):
 #... find top 10 most similar words to a target word
 #.................................................................................
 
+def get_predictions(target_vec):
+	global word_embeddings, uniqueWords, wordcodes
+	similarities = [(word, 1 - cosine(target_vec, word_embeddings[wordcodes[word]])) for word in uniqueWords]
+	similarities.sort(key = lambda x: x[1], reverse=True)
+	return [{"word":word, "score":score} for word,score in similarities[:10]]
+
 
 def get_neighbors(target_word):
 	global word_embeddings, uniqueWords, wordcodes
@@ -490,6 +524,10 @@ def get_neighbors(target_word):
 	#... Note that the cosine() function from scipy.spatial.distance computes a DISTANCE so you need to convert that to a similarity.
 	#... return a list of top 10 most similar words in the form of dicts,
 	#... each dict having format: {"word":<token_name>, "score":<cosine_similarity>}
+	target_vec = word_embeddings[wordcodes[target_word]]
+
+	return get_predictions(target_vec)
+
 
 
 
@@ -525,7 +563,7 @@ if __name__ == '__main__':
 		#... If you just want to load an earlier model and NOT perform further training, comment out the train_vectors() line
 		#... ... and uncomment the load_model() line
 
-		#train_vectors(preload=False)
+		# train_vectors(preload=False)
 		[word_embeddings, proj_embeddings] = load_model()
 
 
@@ -537,33 +575,38 @@ if __name__ == '__main__':
 
 		#... we've got the trained weight matrices. Now we can do some predictions
 		#...pick ten words you choose
-		targets = ["good", "bad", "food", "apple",'tasteful','unbelievably','uncle','tool','think']
-		for targ in targets:
-			print("Target: ", targ)
-			bestpreds= (prediction(targ))
-			for pred in bestpreds:
-				print (pred["word"],":",pred["score"])
-			print ("\n")
+		targets = ["good", "bad", "food", "apple",'tasteful','unbelievably','uncle','tool','think','eat']
+		with open("prob7_output.txt","w") as f:
+			for targ in targets:
+				f.write("Target: " + targ + "\n")
+				for w in get_neighbors(targ):
+					f.write("Word: "+w['word']+" Score: "+str(w['score'])+"\n")
 
 
 
-		#... try an analogy task. The array should have three entries, A,B,C of the format: A is to B as C is to ?
-		print (analogy(["apple", "fruit", "banana"]))
+		# #... try an analogy task. The array should have three entries, A,B,C of the format: A is to B as C is to ?
+		# print (analogy(["apple", "fruit", "banana"]))
+
+		print(analogy(["male","king","female"]))
+		print(analogy(["man","brother","woman"]))
+		print(analogy(["father","mother","grandfather"]))
+		print(analogy(["warm","warmer","cold"]))
+		print(analogy(["small","big","short"]))
+		
 
 
+		# #... try morphological task. Input is averages of vector combinations that use some morphological change.
+		# #... see how well it predicts the expected target word when using word_embeddings vs proj_embeddings in
+		# #... the morphology() function.
+		# #... this is the optional task, if you don't want to finish it, common lines from 545 to 556
 
-		#... try morphological task. Input is averages of vector combinations that use some morphological change.
-		#... see how well it predicts the expected target word when using word_embeddings vs proj_embeddings in
-		#... the morphology() function.
-		#... this is the optional task, if you don't want to finish it, common lines from 545 to 556
-
-		s_suffix = [word_embeddings[wordcodes["banana"]] - word_embeddings[wordcodes["bananas"]]]
-		others = [["apples", "apple"],["values", "value"]]
-		for rec in others:
-			s_suffix.append(word_embeddings[wordcodes[rec[0]]] - word_embeddings[wordcodes[rec[1]]])
-		s_suffix = np.mean(s_suffix, axis=0)
-		print (morphology([s_suffix, "apples"]))
-		print (morphology([s_suffix, "pears"]))
+		# s_suffix = [word_embeddings[wordcodes["banana"]] - word_embeddings[wordcodes["bananas"]]]
+		# others = [["apples", "apple"],["values", "value"]]
+		# for rec in others:
+		# 	s_suffix.append(word_embeddings[wordcodes[rec[0]]] - word_embeddings[wordcodes[rec[1]]])
+		# s_suffix = np.mean(s_suffix, axis=0)
+		# print (morphology([s_suffix, "apples"]))
+		# print (morphology([s_suffix, "pears"]))
 
 
 
